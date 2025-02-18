@@ -18,7 +18,7 @@ class GradientReversalLayer(torch.autograd.Function):
         return grad_output.neg() * ctx.alpha, None
 
 class ViT6DoF(nn.Module):
-    def __init__(self, num_domains=6, use_lora=True):
+    def __init__(self, num_domains=config.NUM_DOMAINS, use_lora=True):
         """
         Args:
             num_domains (int): Number of different sensor domains (for DANN).
@@ -29,8 +29,13 @@ class ViT6DoF(nn.Module):
         # Load Pretrained ViT
         self.vit = ViTModel.from_pretrained("google/vit-base-patch16-224-in21k")
 
-        # Pose Regressor (Predicts X, Y, Z, Rx, Ry, Rz)
-        self.regressor = nn.Linear(768, 6)
+        # Pose regression head
+        self.pose_head = nn.Sequential(
+            nn.Linear(768, 512),
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(512, 6)  # Output 6 values: (z, Rx, Ry, Fx, Fy, Fz)
+        )
 
         # Domain Classifier (Only if DANN is enabled)
         self.use_dann = config.USE_DANN
@@ -44,19 +49,22 @@ class ViT6DoF(nn.Module):
 
         self.use_lora = use_lora  # LoRA integration flag
 
-    def forward(self, x, alpha=1.0):
+    def forward(self, x, alpha=1.0, return_features=False):
         """
         Forward pass that returns pose predictions and domain classification if DANN is enabled.
         """
         features = self.vit(x).last_hidden_state[:, 0, :]  # Extract CLS token features
 
         # Pose prediction
-        pose = self.regressor(features)
+        pose = self.pose_head(features)
 
         # Domain classification (Only if DANN is enabled)
         domain_pred = None
         if self.use_dann:
             reversed_features = GradientReversalLayer.apply(features, alpha)
             domain_pred = self.domain_classifier(reversed_features)
-
-        return pose, domain_pred
+        
+        if return_features:
+            return pose, domain_pred, features  # Return features for MMD/DANN
+        else:
+            return pose, domain_pred
